@@ -27,7 +27,6 @@ class ShotMetrics:
     saturation_0_255: float
     warm_color_ratio: float
     edge_density: float
-    face_count_est: int
 
 
 def _rgb_to_hex(rgb: np.ndarray) -> str:
@@ -45,7 +44,7 @@ def _dominant_rgb(frame_bgr: np.ndarray) -> np.ndarray:
     return np.clip(colors[np.argmax(counts)], 0, 255).astype(np.uint8)
 
 
-def _frame_metrics(frame_bgr: np.ndarray, face_cascade) -> dict:
+def _frame_metrics(frame_bgr: np.ndarray) -> dict:
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -59,9 +58,6 @@ def _frame_metrics(frame_bgr: np.ndarray, face_cascade) -> dict:
     edges = cv2.Canny(gray, 100, 200)
     edge_density = (edges > 0).mean()
 
-    faces = face_cascade.detectMultiScale(
-        gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-    )
 
     return {
         "dominant_rgb": dominant,
@@ -70,7 +66,6 @@ def _frame_metrics(frame_bgr: np.ndarray, face_cascade) -> dict:
         "saturation": float(hsv[:, :, 1].mean()),
         "warm_ratio": float(warm),
         "edge_density": float(edge_density),
-        "faces": int(len(faces)),
     }
 
 
@@ -141,10 +136,6 @@ def analyze_video(video_path: str, threshold: float = 0.48, min_shot_sec: float 
     )
 
     cap = cv2.VideoCapture(video_path)
-    face_cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    )
-
     rows = []
     n = max(1, len(shots))
     for i, (start_f, end_f) in enumerate(shots, start=1):
@@ -154,7 +145,7 @@ def analyze_video(video_path: str, threshold: float = 0.48, min_shot_sec: float 
         if not ok:
             continue
 
-        metrics = _frame_metrics(frame, face_cascade)
+        metrics = _frame_metrics(frame)
         rgb = metrics["dominant_rgb"]
         start_sec = start_f / fps
         end_sec = end_f / fps
@@ -173,7 +164,6 @@ def analyze_video(video_path: str, threshold: float = 0.48, min_shot_sec: float 
             saturation_0_255=round(metrics["saturation"], 2),
             warm_color_ratio=round(metrics["warm_ratio"], 4),
             edge_density=round(metrics["edge_density"], 4),
-            face_count_est=metrics["faces"],
         )
         rows.append(asdict(row))
         if progress:
@@ -206,7 +196,6 @@ def analyze_video(video_path: str, threshold: float = 0.48, min_shot_sec: float 
             "weighted_contrast_sd": round(float(np.average(shots_df["contrast_sd"], weights=weights)), 2),
             "weighted_saturation_0_255": round(float(np.average(shots_df["saturation_0_255"], weights=weights)), 2),
             "weighted_warm_color_ratio": round(float(np.average(shots_df["warm_color_ratio"], weights=weights)), 4),
-            "mean_faces_per_shot_est": round(float(shots_df["face_count_est"].mean()), 2),
         }
 
     summary_df = pd.DataFrame([summary]).T.reset_index()

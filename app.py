@@ -116,12 +116,11 @@ if can_analyze and st.button("Analyze video", type="primary", use_container_widt
             m2.write(f"**Channel:** {source_metadata.get('uploader', '') or '—'}")
 
         if not shots_df.empty:
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3 = st.columns(3)
             summary_map = dict(zip(summary_df["metric"], summary_df["value"]))
             c1.metric("Detected shots", int(summary_map.get("shot_count", 0)))
             c2.metric("Avg. shot length", f'{summary_map.get("average_shot_length_sec", 0):.2f} s')
             c3.metric("Video duration", f'{summary_map.get("video_duration_sec", 0):.1f} s')
-            c4.metric("Mean faces/shot", f'{summary_map.get("mean_faces_per_shot_est", 0):.2f}')
 
         st.subheader("Video summary")
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
