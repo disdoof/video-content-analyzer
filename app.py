@@ -171,6 +171,9 @@ if can_analyze and st.button("Analyze video", type="primary", use_container_widt
         metric_items = []
         if SHOT_ANALYSIS in selected_analyses:
             metric_items.append(
+                ("Detected cuts", str(int(summary_map.get("Detected cuts", 0) or 0)))
+            )
+            metric_items.append(
                 ("Detected shots", str(int(summary_map.get("Detected shots", 0) or 0)))
             )
             metric_items.append(
@@ -209,8 +212,6 @@ if can_analyze and st.button("Analyze video", type="primary", use_container_widt
                 "shot_number",
                 "start_timecode",
                 "end_timecode",
-                "start_sec",
-                "end_sec",
                 "duration_sec",
             ] if c in shots_df.columns]
             st.dataframe(
@@ -219,19 +220,27 @@ if can_analyze and st.button("Analyze video", type="primary", use_container_widt
                 hide_index=True,
             )
 
-            if "thumbnail_bytes" in shots_df.columns:
-                st.subheader("Shot thumbnails")
-                thumbs_per_row = 3
-                shot_records = shots_df.to_dict("records")
-                for i in range(0, len(shot_records), thumbs_per_row):
-                    row = shot_records[i:i + thumbs_per_row]
-                    cols = st.columns(thumbs_per_row)
-                    for col, rec in zip(cols, row):
-                        with col:
-                            st.image(rec["thumbnail_bytes"], use_container_width=True)
-                            st.caption(
-                                f"Shot {rec['shot_number']} | {rec['start_timecode']} → {rec['end_timecode']} | {rec['duration_sec']:.2f} s"
-                            )
+            if "first_frame_bytes" in shots_df.columns and "last_frame_bytes" in shots_df.columns:
+                st.subheader("Shot boundary validation")
+                st.caption("For each detected shot: exact first frame on the left, exact last frame on the right.")
+                for rec in shots_df.to_dict("records"):
+                    st.markdown(
+                        f"**Shot {rec['shot_number']}** — {rec['start_timecode']} → {rec['end_timecode']}  ·  {rec['duration_sec']:.2f} s"
+                    )
+                    left, right = st.columns(2)
+                    with left:
+                        st.caption(f"First frame · {rec['start_timecode']}")
+                        if rec.get("first_frame_bytes"):
+                            st.image(rec["first_frame_bytes"], use_container_width=True)
+                        else:
+                            st.warning("First frame could not be extracted.")
+                    with right:
+                        st.caption(f"Last frame · {rec['end_timecode']}")
+                        if rec.get("last_frame_bytes"):
+                            st.image(rec["last_frame_bytes"], use_container_width=True)
+                        else:
+                            st.warning("Last frame could not be extracted.")
+                    st.divider()
 
         excel_bytes = make_excel(
             summary_df,

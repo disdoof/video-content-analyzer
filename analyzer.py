@@ -58,12 +58,21 @@ def _video_info(video_path: str):
 
 
 def _frame_to_timecode(frame_idx: int, fps: float) -> str:
-    fps_rounded = max(1, int(round(fps)))
-    total_seconds = int(frame_idx // fps_rounded)
-    minutes = total_seconds // 60
-    seconds = total_seconds % 60
-    frames = int(frame_idx % fps_rounded)
-    return f"{minutes:02d}:{seconds:02d}:{frames:02d}"
+    """Convert a zero-based frame index to MM:SS:FF using the video's FPS.
+
+    FF is the frame position inside the current second. This is a research
+    validation timecode, not SMPTE drop-frame timecode.
+    """
+    fps = float(fps) if fps and fps > 0 else 25.0
+    time_sec = float(frame_idx) / fps
+    whole_seconds = int(np.floor(time_sec + 1e-9))
+    minutes = whole_seconds // 60
+    seconds = whole_seconds % 60
+    frame_in_second = int(round((time_sec - whole_seconds) * fps))
+    nominal_fps = max(1, int(round(fps)))
+    if frame_in_second >= nominal_fps:
+        frame_in_second = nominal_fps - 1
+    return f"{minutes:02d}:{seconds:02d}:{frame_in_second:02d}"
 
 
 def _encode_thumbnail(frame_bgr: np.ndarray, max_width: int = 220) -> bytes:
@@ -137,30 +146,42 @@ def detect_cuts(
     return shots, fps, duration
 
 
-def _extract_shot_thumbnails(video_path: str, shots: list[tuple[int, int]], progress=None) -> list[bytes]:
+def _extract_shot_boundary_images(
+    video_path: str,
+    shots: list[tuple[int, int]],
+    progress=None,
+) -> list[tuple[bytes, bytes]]:
+    """Return (first-frame image, last-frame image) for every detected shot."""
     if not shots:
         return []
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        return [b"" for _ in shots]
+        return [(b"", b"") for _ in shots]
 
-    thumbs = []
+    images = []
     total = len(shots)
     for i, (start_f, end_f) in enumerate(shots, start=1):
-        thumb_frame = start_f + max(0, (end_f - start_f) // 2)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(thumb_frame))
+        first_bytes = b""
+        last_bytes = b""
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(start_f))
         ok, frame = cap.read()
         if ok:
-            thumbs.append(_encode_thumbnail(frame))
-        else:
-            thumbs.append(b"")
+            first_bytes = _encode_thumbnail(frame, max_width=420)
 
+        last_f = max(start_f, end_f - 1)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(last_f))
+        ok, frame = cap.read()
+        if ok:
+            last_bytes = _encode_thumbnail(frame, max_width=420)
+
+        images.append((first_bytes, last_bytes))
         if progress:
-            progress(i / max(1, total), f"Preparing shot thumbnails {i} of {total}…")
+            progress(i / max(1, total), f"Preparing first/last frames {i} of {total}…")
 
     cap.release()
-    return thumbs
+    return images
 
 
 def _sample_visual_measures(
@@ -255,27 +276,26 @@ def analyze_video(
             progress=cut_progress,
         )
 
-        thumb_bytes = []
+        boundary_images = []
         def thumb_progress(p, text):
             if progress:
                 start = 0.50 if wants_visual else 0.70
                 width = 0.15 if wants_visual else 0.25
                 progress(start + width * p, text)
 
-        thumb_bytes = _extract_shot_thumbnails(video_path, shots, progress=thumb_progress)
+        boundary_images = _extract_shot_boundary_images(video_path, shots, progress=thumb_progress)
 
         rows = []
-        for i, ((start_f, end_f), thumb) in enumerate(zip(shots, thumb_bytes), start=1):
+        for i, ((start_f, end_f), (first_img, last_img)) in enumerate(zip(shots, boundary_images), start=1):
             start_sec = start_f / fps
             end_sec = end_f / fps
             rows.append({
                 "shot_number": i,
                 "start_timecode": _frame_to_timecode(start_f, fps),
                 "end_timecode": _frame_to_timecode(max(start_f, end_f - 1), fps),
-                "start_sec": round(start_sec, 3),
-                "end_sec": round(end_sec, 3),
                 "duration_sec": round(end_sec - start_sec, 3),
-                "thumbnail_bytes": thumb,
+                "first_frame_bytes": first_img,
+                "last_frame_bytes": last_img,
             })
         shots_df = pd.DataFrame(rows)
 
@@ -300,6 +320,7 @@ def analyze_video(
     summary_rows = [("Video duration (sec)", round(duration, 3))]
 
     if wants_shots:
+        summary_rows.append(("Detected cuts", max(0, int(len(shots_df)) - 1)))
         summary_rows.append(("Detected shots", int(len(shots_df))))
         avg_shot = round(float(shots_df["duration_sec"].mean()), 3) if not shots_df.empty else None
         summary_rows.append(("Average shot length (sec)", avg_shot))
@@ -345,7 +366,7 @@ def make_excel(
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
-        excel_shots_df = shots_df.drop(columns=["thumbnail_bytes"], errors="ignore")
+        excel_shots_df = shots_df.drop(columns=["first_frame_bytes", "last_frame_bytes"], errors="ignore")
         if not excel_shots_df.empty:
             excel_shots_df.to_excel(writer, sheet_name="Shots", index=False)
 
@@ -394,7 +415,7 @@ def make_excel(
                 ("Minimum shot duration", f'{metadata.get("min_shot_sec", "")} seconds'),
                 ("Validation timecode format", "MM:SS:FF (minute:second:frame)"),
                 ("Video FPS", str(metadata.get("fps", ""))),
-                ("Shot thumbnail", "Each shot thumbnail is taken from the approximate middle frame of the detected shot and shown in the app for validation."),
+                ("Shot validation images", "For each detected shot, the app shows the exact first frame and exact last frame (end frame minus one) for visual validation."),
             ])
 
         if selected & {WARM_COLOR, SATURATION, CONTRAST}:
