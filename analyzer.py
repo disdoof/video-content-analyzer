@@ -21,7 +21,6 @@ def _histogram(frame_bgr: np.ndarray) -> np.ndarray:
 
 
 def _selected_frame_metrics(frame_bgr: np.ndarray, analyses: Set[str]) -> dict:
-    """Calculate only the visual measures explicitly selected by the user."""
     result = {}
 
     needs_hsv = WARM_COLOR in analyses or SATURATION in analyses
@@ -31,22 +30,16 @@ def _selected_frame_metrics(frame_bgr: np.ndarray, analyses: Set[str]) -> dict:
         if WARM_COLOR in analyses:
             h = hsv[:, :, 0]
             s = hsv[:, :, 1]
-            # Approximate share of sufficiently saturated warm pixels
-            # (red/orange/yellow) on a 0..1 scale.
             result["warm_color_ratio_0_1"] = float(
                 (((h <= 35) | (h >= 170)) & (s >= 40)).mean()
             )
 
         if SATURATION in analyses:
-            result["color_saturation_score_0_1"] = float(
-                hsv[:, :, 1].mean()
-            ) / 255.0
+            result["color_saturation_score_0_1"] = float(hsv[:, :, 1].mean()) / 255.0
 
     if CONTRAST in analyses:
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        result["contrast_score_0_1"] = min(
-            1.0, float(gray.std()) / 127.5
-        )
+        result["contrast_score_0_1"] = min(1.0, float(gray.std()) / 127.5)
 
     return result
 
@@ -56,10 +49,32 @@ def _video_info(video_path: str):
     if not cap.isOpened():
         raise ValueError("Video could not be opened. Try MP4/H.264 if possible.")
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    if fps <= 0:
+        fps = 25.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / fps if fps > 0 else 0.0
     cap.release()
     return fps, total_frames, duration
+
+
+def _frame_to_timecode(frame_idx: int, fps: float) -> str:
+    fps_rounded = max(1, int(round(fps)))
+    total_seconds = int(frame_idx // fps_rounded)
+    minutes = total_seconds // 60
+    seconds = total_seconds % 60
+    frames = int(frame_idx % fps_rounded)
+    return f"{minutes:02d}:{seconds:02d}:{frames:02d}"
+
+
+def _encode_thumbnail(frame_bgr: np.ndarray, max_width: int = 220) -> bytes:
+    h, w = frame_bgr.shape[:2]
+    if w > max_width:
+        new_h = int(h * max_width / w)
+        frame_bgr = cv2.resize(frame_bgr, (max_width, new_h), interpolation=cv2.INTER_AREA)
+    ok, buffer = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if not ok:
+        return b""
+    return buffer.tobytes()
 
 
 def detect_cuts(
@@ -68,12 +83,13 @@ def detect_cuts(
     min_shot_sec: float = 0.45,
     progress: Optional[Callable[[float, str], None]] = None,
 ):
-    """Detect abrupt shot boundaries only. No color/contrast metrics are computed."""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise ValueError("Video could not be opened. Try MP4/H.264 if possible.")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    if fps <= 0:
+        fps = 25.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / fps if fps > 0 else 0.0
     min_gap_frames = max(1, int(min_shot_sec * fps))
@@ -107,10 +123,7 @@ def detect_cuts(
 
         frame_idx += 1
         if progress and total_frames and frame_idx % max(1, int(fps)) == 0:
-            progress(
-                min(1.0, frame_idx / total_frames),
-                "Detecting shot boundaries…",
-            )
+            progress(min(1.0, frame_idx / total_frames), "Detecting shot boundaries…")
 
     cap.release()
 
@@ -124,6 +137,32 @@ def detect_cuts(
     return shots, fps, duration
 
 
+def _extract_shot_thumbnails(video_path: str, shots: list[tuple[int, int]], progress=None) -> list[bytes]:
+    if not shots:
+        return []
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return [b"" for _ in shots]
+
+    thumbs = []
+    total = len(shots)
+    for i, (start_f, end_f) in enumerate(shots, start=1):
+        thumb_frame = start_f + max(0, (end_f - start_f) // 2)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(thumb_frame))
+        ok, frame = cap.read()
+        if ok:
+            thumbs.append(_encode_thumbnail(frame))
+        else:
+            thumbs.append(b"")
+
+        if progress:
+            progress(i / max(1, total), f"Preparing shot thumbnails {i} of {total}…")
+
+    cap.release()
+    return thumbs
+
+
 def _sample_visual_measures(
     video_path: str,
     analyses: Set[str],
@@ -131,12 +170,6 @@ def _sample_visual_measures(
     total_frames: int,
     progress: Optional[Callable[[float, str], None]] = None,
 ):
-    """Measure selected visual variables from uniform temporal samples.
-
-    The sampling is independent of shot detection so visual variables can be
-    analyzed on their own. Approximately one frame per second is sampled, up
-    to 300 evenly spaced frames for long videos.
-    """
     visual = analyses & {WARM_COLOR, SATURATION, CONTRAST}
     if not visual:
         return {}, 0
@@ -179,10 +212,7 @@ def _sample_visual_measures(
             collected[key].append(value)
 
         if progress:
-            progress(
-                i / max(1, total_samples),
-                f"Analyzing visual sample {i} of {total_samples}…",
-            )
+            progress(i / max(1, total_samples), f"Analyzing visual sample {i} of {total_samples}…")
 
     cap.release()
 
@@ -215,7 +245,7 @@ def analyze_video(
     if wants_shots:
         def cut_progress(p, text):
             if progress:
-                weight = 0.58 if wants_visual else 0.95
+                weight = 0.50 if wants_visual else 0.70
                 progress(weight * p, text)
 
         shots, fps, duration = detect_cuts(
@@ -225,18 +255,28 @@ def analyze_video(
             progress=cut_progress,
         )
 
+        thumb_bytes = []
+        def thumb_progress(p, text):
+            if progress:
+                start = 0.50 if wants_visual else 0.70
+                width = 0.15 if wants_visual else 0.25
+                progress(start + width * p, text)
+
+        thumb_bytes = _extract_shot_thumbnails(video_path, shots, progress=thumb_progress)
+
         rows = []
-        for i, (start_f, end_f) in enumerate(shots, start=1):
+        for i, ((start_f, end_f), thumb) in enumerate(zip(shots, thumb_bytes), start=1):
             start_sec = start_f / fps
             end_sec = end_f / fps
-            rows.append(
-                {
-                    "shot_number": i,
-                    "start_sec": round(start_sec, 3),
-                    "end_sec": round(end_sec, 3),
-                    "duration_sec": round(end_sec - start_sec, 3),
-                }
-            )
+            rows.append({
+                "shot_number": i,
+                "start_timecode": _frame_to_timecode(start_f, fps),
+                "end_timecode": _frame_to_timecode(max(start_f, end_f - 1), fps),
+                "start_sec": round(start_sec, 3),
+                "end_sec": round(end_sec, 3),
+                "duration_sec": round(end_sec - start_sec, 3),
+                "thumbnail_bytes": thumb,
+            })
         shots_df = pd.DataFrame(rows)
 
     visual_means = {}
@@ -245,7 +285,7 @@ def analyze_video(
         def visual_progress(p, text):
             if progress:
                 if wants_shots:
-                    progress(0.58 + 0.37 * p, text)
+                    progress(0.65 + 0.30 * p, text)
                 else:
                     progress(0.95 * p, text)
 
@@ -261,30 +301,20 @@ def analyze_video(
 
     if wants_shots:
         summary_rows.append(("Detected shots", int(len(shots_df))))
-        avg_shot = (
-            round(float(shots_df["duration_sec"].mean()), 3)
-            if not shots_df.empty
-            else None
-        )
+        avg_shot = round(float(shots_df["duration_sec"].mean()), 3) if not shots_df.empty else None
         summary_rows.append(("Average shot length (sec)", avg_shot))
 
     if WARM_COLOR in analyses:
         value = visual_means.get("warm_color_ratio_0_1")
-        summary_rows.append(
-            ("Warm-color ratio (0–1)", round(value, 4) if value is not None else None)
-        )
+        summary_rows.append(("Warm-color ratio (0–1)", round(value, 4) if value is not None else None))
 
     if SATURATION in analyses:
         value = visual_means.get("color_saturation_score_0_1")
-        summary_rows.append(
-            ("Color saturation score (0–1)", round(value, 4) if value is not None else None)
-        )
+        summary_rows.append(("Color saturation score (0–1)", round(value, 4) if value is not None else None))
 
     if CONTRAST in analyses:
         value = visual_means.get("contrast_score_0_1")
-        summary_rows.append(
-            ("Contrast score (0–1)", round(value, 4) if value is not None else None)
-        )
+        summary_rows.append(("Contrast score (0–1)", round(value, 4) if value is not None else None))
 
     summary_df = pd.DataFrame(summary_rows, columns=["Measure", "Value"])
 
@@ -296,6 +326,7 @@ def analyze_video(
         "visual_sample_count": sample_count,
         "threshold": threshold,
         "min_shot_sec": min_shot_sec,
+        "fps": round(fps, 3),
     }
     return summary_df, shots_df, metadata
 
@@ -314,13 +345,12 @@ def make_excel(
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
-        if not shots_df.empty:
-            shots_df.to_excel(writer, sheet_name="Shots", index=False)
+        excel_shots_df = shots_df.drop(columns=["thumbnail_bytes"], errors="ignore")
+        if not excel_shots_df.empty:
+            excel_shots_df.to_excel(writer, sheet_name="Shots", index=False)
 
         workbook = writer.book
-        header_fmt = workbook.add_format(
-            {"bold": True, "bg_color": "#E8EEF7", "border": 1}
-        )
+        header_fmt = workbook.add_format({"bold": True, "bg_color": "#E8EEF7", "border": 1})
         title_fmt = workbook.add_format({"bold": True, "font_size": 14})
         note_fmt = workbook.add_format({"text_wrap": True, "valign": "top"})
 
@@ -330,17 +360,12 @@ def make_excel(
         for col, name in enumerate(summary_df.columns):
             ws1.write(0, col, name, header_fmt)
 
-        if not shots_df.empty:
+        if not excel_shots_df.empty:
             ws2 = writer.sheets["Shots"]
             ws2.freeze_panes(1, 0)
-            ws2.autofilter(
-                0,
-                0,
-                max(1, len(shots_df)),
-                max(0, len(shots_df.columns) - 1),
-            )
-            ws2.set_column(0, max(0, len(shots_df.columns) - 1), 20)
-            for col, name in enumerate(shots_df.columns):
+            ws2.autofilter(0, 0, max(1, len(excel_shots_df)), max(0, len(excel_shots_df.columns) - 1))
+            ws2.set_column(0, max(0, len(excel_shots_df.columns) - 1), 18)
+            for col, name in enumerate(excel_shots_df.columns):
                 ws2.write(0, col, name, header_fmt)
 
         notes = workbook.add_worksheet("Method")
@@ -357,9 +382,7 @@ def make_excel(
         }
         selected_labels = [label_map[x] for x in [SHOT_ANALYSIS, WARM_COLOR, SATURATION, CONTRAST] if x in selected]
 
-        method_rows = [
-            ("Selected analyses", ", ".join(selected_labels)),
-        ]
+        method_rows = [("Selected analyses", ", ".join(selected_labels))]
 
         if SHOT_ANALYSIS in selected:
             method_rows.extend([
@@ -369,6 +392,9 @@ def make_excel(
                 ),
                 ("Shot-change threshold", str(metadata.get("threshold", ""))),
                 ("Minimum shot duration", f'{metadata.get("min_shot_sec", "")} seconds'),
+                ("Validation timecode format", "MM:SS:FF (minute:second:frame)"),
+                ("Video FPS", str(metadata.get("fps", ""))),
+                ("Shot thumbnail", "Each shot thumbnail is taken from the approximate middle frame of the detected shot and shown in the app for validation."),
             ])
 
         if selected & {WARM_COLOR, SATURATION, CONTRAST}:
@@ -380,34 +406,14 @@ def make_excel(
             )
 
         if WARM_COLOR in selected:
-            method_rows.append(
-                (
-                    "Warm-color ratio (0–1)",
-                    "Mean proportion of sufficiently saturated pixels falling in the approximate red/orange/yellow hue ranges. 0 = none; 1 = all sampled pixels meet the warm-color rule.",
-                )
-            )
+            method_rows.append(("Warm-color ratio (0–1)", "Mean proportion of sufficiently saturated pixels falling in the approximate red/orange/yellow hue ranges. 0 = none; 1 = all sampled pixels meet the warm-color rule."))
         if SATURATION in selected:
-            method_rows.append(
-                (
-                    "Color saturation score (0–1)",
-                    "Mean HSV saturation normalized from OpenCV's 0–255 scale to 0–1.",
-                )
-            )
+            method_rows.append(("Color saturation score (0–1)", "Mean HSV saturation normalized from OpenCV's 0–255 scale to 0–1."))
         if CONTRAST in selected:
-            method_rows.append(
-                (
-                    "Contrast score (0–1)",
-                    "Mean grayscale standard deviation normalized by the theoretical 8-bit maximum standard deviation (127.5), then clipped to 0–1.",
-                )
-            )
+            method_rows.append(("Contrast score (0–1)", "Mean grayscale standard deviation normalized by the theoretical 8-bit maximum standard deviation (127.5), then clipped to 0–1."))
 
         if selected & {WARM_COLOR, SATURATION, CONTRAST}:
-            method_rows.append(
-                (
-                    "Category thresholds",
-                    "This version does not convert the numeric scores into warm/cool or low/medium/high categories. Category thresholds can be fixed after calibration and validation.",
-                )
-            )
+            method_rows.append(("Category thresholds", "This version does not convert the numeric scores into warm/cool or low/medium/high categories. Category thresholds can be fixed after calibration and validation."))
 
         for r, (k, v) in enumerate(method_rows, start=3):
             notes.write(r, 0, k, header_fmt)

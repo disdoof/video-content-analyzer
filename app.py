@@ -26,7 +26,6 @@ ANALYSIS_OPTIONS = {
     "analysis_contrast": ("Contrast", CONTRAST),
 }
 
-# Initialize selection state once.
 if "analysis_select_all" not in st.session_state:
     st.session_state.analysis_select_all = True
 for key in ANALYSIS_OPTIONS:
@@ -169,8 +168,6 @@ if can_analyze and st.button("Analyze video", type="primary", use_container_widt
             m2.write(f"**Channel:** {source_metadata.get('uploader', '') or '—'}")
 
         summary_map = dict(zip(summary_df["Measure"], summary_df["Value"]))
-
-        # Show only top metrics that correspond to selected analyses.
         metric_items = []
         if SHOT_ANALYSIS in selected_analyses:
             metric_items.append(
@@ -203,9 +200,38 @@ if can_analyze and st.button("Analyze video", type="primary", use_container_widt
         st.subheader("Research measures")
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
+        if SHOT_ANALYSIS in selected_analyses and analysis_metadata.get("fps"):
+            st.caption(f"Shot validation timecode format: MM:SS:FF  |  Video FPS: {analysis_metadata.get('fps')}")
+
         if SHOT_ANALYSIS in selected_analyses and not shots_df.empty:
             st.subheader("Shot-level data")
-            st.dataframe(shots_df, use_container_width=True, hide_index=True)
+            table_columns = [c for c in [
+                "shot_number",
+                "start_timecode",
+                "end_timecode",
+                "start_sec",
+                "end_sec",
+                "duration_sec",
+            ] if c in shots_df.columns]
+            st.dataframe(
+                shots_df[table_columns],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            if "thumbnail_bytes" in shots_df.columns:
+                st.subheader("Shot thumbnails")
+                thumbs_per_row = 3
+                shot_records = shots_df.to_dict("records")
+                for i in range(0, len(shot_records), thumbs_per_row):
+                    row = shot_records[i:i + thumbs_per_row]
+                    cols = st.columns(thumbs_per_row)
+                    for col, rec in zip(cols, row):
+                        with col:
+                            st.image(rec["thumbnail_bytes"], use_container_width=True)
+                            st.caption(
+                                f"Shot {rec['shot_number']} | {rec['start_timecode']} → {rec['end_timecode']} | {rec['duration_sec']:.2f} s"
+                            )
 
         excel_bytes = make_excel(
             summary_df,
