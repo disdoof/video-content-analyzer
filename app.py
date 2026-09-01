@@ -4,12 +4,12 @@ from pathlib import Path
 
 import streamlit as st
 
-from analyzer import analyze_video, make_excel, SHOT_ANALYSIS, WARM_COLOR, SATURATION, CONTRAST
+from diagnostic_analyzer import analyze_video, make_excel, SHOT_ANALYSIS, WARM_COLOR, SATURATION, CONTRAST, DIAGNOSTIC_API_VERSION
 from youtube_utils import download_youtube_video, is_youtube_url
 
 st.set_page_config(page_title="Video Content Analyzer", page_icon="🎬", layout="wide")
 st.title("🎬 Video Content Analyzer")
-st.caption("Research-oriented audiovisual content analysis — Diagnostic cut-validation build")
+st.caption(f"Research-oriented audiovisual content analysis — Diagnostic cut-validation build v{DIAGNOSTIC_API_VERSION}")
 
 ANALYSIS_OPTIONS = {
     "analysis_shot": ("Shot / cut analysis", SHOT_ANALYSIS),
@@ -68,9 +68,15 @@ if has_source and selected_analyses and st.button("Analyze video",type="primary"
             display_name=f"{source_metadata.get('title','youtube')}{Path(tmp_path).suffix}"
             def ap(p,text): update(0.25+0.75*p,text)
 
-        summary,shots,diagnostics,events,meta=analyze_video(
+        result = analyze_video(
             tmp_path,selected_analyses,threshold=threshold,min_shot_sec=min_shot,progress=ap
         )
+        if not isinstance(result, tuple) or len(result) != 5:
+            raise RuntimeError(
+                f"Diagnostic engine mismatch: expected 5 outputs, received {len(result) if isinstance(result, tuple) else 'non-tuple'}. "
+                "Please make sure app.py and diagnostic_analyzer.py from the same patch are both uploaded."
+            )
+        summary,shots,diagnostics,events,meta=result
         st.success("Analysis complete.")
         smap=dict(zip(summary["Measure"],summary["Value"]))
         if SHOT_ANALYSIS in selected_analyses:
