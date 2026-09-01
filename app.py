@@ -4,20 +4,12 @@ from pathlib import Path
 
 import streamlit as st
 
-from analyzer import (
-    analyze_video,
-    make_excel,
-    SHOT_ANALYSIS,
-    WARM_COLOR,
-    SATURATION,
-    CONTRAST,
-)
+from analyzer import analyze_video, make_excel, SHOT_ANALYSIS, WARM_COLOR, SATURATION, CONTRAST
 from youtube_utils import download_youtube_video, is_youtube_url
 
 st.set_page_config(page_title="Video Content Analyzer", page_icon="🎬", layout="wide")
-
 st.title("🎬 Video Content Analyzer")
-st.caption("Research-oriented audiovisual content analysis — local video or YouTube URL")
+st.caption("Research-oriented audiovisual content analysis — Diagnostic cut-validation build")
 
 ANALYSIS_OPTIONS = {
     "analysis_shot": ("Shot / cut analysis", SHOT_ANALYSIS),
@@ -25,243 +17,108 @@ ANALYSIS_OPTIONS = {
     "analysis_saturation": ("Color saturation", SATURATION),
     "analysis_contrast": ("Contrast", CONTRAST),
 }
-
-if "analysis_select_all" not in st.session_state:
-    st.session_state.analysis_select_all = True
+if "analysis_select_all" not in st.session_state: st.session_state.analysis_select_all = True
 for key in ANALYSIS_OPTIONS:
-    if key not in st.session_state:
-        st.session_state[key] = True
-
+    if key not in st.session_state: st.session_state[key] = True
 
 def _select_all_changed():
-    value = bool(st.session_state.analysis_select_all)
-    for key in ANALYSIS_OPTIONS:
-        st.session_state[key] = value
-
+    for key in ANALYSIS_OPTIONS: st.session_state[key] = bool(st.session_state.analysis_select_all)
 
 def _individual_changed():
-    st.session_state.analysis_select_all = all(
-        bool(st.session_state[key]) for key in ANALYSIS_OPTIONS
-    )
-
+    st.session_state.analysis_select_all = all(bool(st.session_state[k]) for k in ANALYSIS_OPTIONS)
 
 with st.sidebar:
     st.header("Analyses to run")
-    st.checkbox(
-        "Select all",
-        key="analysis_select_all",
-        on_change=_select_all_changed,
-    )
+    st.checkbox("Select all", key="analysis_select_all", on_change=_select_all_changed)
     st.divider()
-    for key, (label, _) in ANALYSIS_OPTIONS.items():
-        st.checkbox(label, key=key, on_change=_individual_changed)
-
-    selected_analyses = {
-        analysis_id
-        for key, (_, analysis_id) in ANALYSIS_OPTIONS.items()
-        if st.session_state[key]
-    }
-
-    threshold = 0.48
-    min_shot = 0.45
+    for key,(label,_) in ANALYSIS_OPTIONS.items(): st.checkbox(label,key=key,on_change=_individual_changed)
+    selected_analyses={aid for key,(_,aid) in ANALYSIS_OPTIONS.items() if st.session_state[key]}
+    threshold=0.48; min_shot=0.45
     if SHOT_ANALYSIS in selected_analyses:
-        st.divider()
-        st.header("Detection settings")
-        threshold = st.slider(
-            "Shot-change threshold",
-            min_value=0.20,
-            max_value=0.90,
-            value=0.48,
-            step=0.02,
-            help="Unitless detection threshold. Lower values detect more visual changes as cuts; higher values detect only stronger changes.",
-        )
-        min_shot = st.slider(
-            "Minimum shot duration (seconds)",
-            min_value=0.20,
-            max_value=2.00,
-            value=0.45,
-            step=0.05,
-        )
+        st.divider(); st.header("Detection settings")
+        threshold=st.slider("Shot-change threshold",0.20,0.90,0.48,0.02,
+            help="Current detector threshold. This diagnostic build does not change the detector logic.")
+        min_shot=st.slider("Minimum shot duration (seconds)",0.20,2.00,0.45,0.05)
 
-source_mode = st.radio(
-    "Video source",
-    ["Upload Video", "YouTube URL"],
-    horizontal=True,
-)
-
-uploaded = None
-youtube_url = ""
-
-if source_mode == "Upload Video":
-    uploaded = st.file_uploader(
-        "Upload a video",
-        type=["mp4", "mov", "m4v", "avi", "mkv", "webm"],
-    )
-    if uploaded is not None:
-        st.video(uploaded)
+source_mode=st.radio("Video source",["Upload Video","YouTube URL"],horizontal=True)
+uploaded=None; youtube_url=""
+if source_mode=="Upload Video":
+    uploaded=st.file_uploader("Upload a video",type=["mp4","mov","m4v","avi","mkv","webm"])
+    if uploaded is not None: st.video(uploaded)
 else:
-    youtube_url = st.text_input(
-        "Paste a YouTube link",
-        placeholder="https://www.youtube.com/watch?v=…  or  https://youtu.be/…",
-    ).strip()
-    if youtube_url:
-        if is_youtube_url(youtube_url):
-            st.caption("The video will be downloaded temporarily for analysis and deleted afterward.")
-        else:
-            st.warning("That does not look like a YouTube link.")
+    youtube_url=st.text_input("Paste a YouTube link",placeholder="https://www.youtube.com/watch?v=…").strip()
+    if youtube_url and not is_youtube_url(youtube_url): st.warning("That does not look like a YouTube link.")
 
-if not selected_analyses:
-    st.warning("Select at least one analysis from the sidebar.")
+if not selected_analyses: st.warning("Select at least one analysis from the sidebar.")
+has_source=(source_mode=="Upload Video" and uploaded is not None) or (source_mode=="YouTube URL" and youtube_url and is_youtube_url(youtube_url))
 
-has_source = (source_mode == "Upload Video" and uploaded is not None) or (
-    source_mode == "YouTube URL" and bool(youtube_url) and is_youtube_url(youtube_url)
-)
-can_analyze = has_source and bool(selected_analyses)
-
-if can_analyze and st.button("Analyze video", type="primary", use_container_width=True):
-    progress_bar = st.progress(0.0)
-    status = st.empty()
-
-    def update(p, text):
-        progress_bar.progress(float(max(0.0, min(1.0, p))))
-        status.write(text)
-
-    tmp_path = None
-    tmp_dir_obj = None
-    display_name = "video"
-    source_metadata = None
-
+if has_source and selected_analyses and st.button("Analyze video",type="primary",use_container_width=True):
+    bar=st.progress(0.0); status=st.empty()
+    def update(p,text): bar.progress(float(max(0,min(1,p)))); status.write(text)
+    tmp_path=None; tmp_dir=None; display_name="video"; source_metadata=None
     try:
-        if source_mode == "Upload Video":
-            suffix = Path(uploaded.name).suffix or ".mp4"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(uploaded.getbuffer())
-                tmp_path = tmp.name
-            display_name = uploaded.name
-            analysis_progress = update
+        if source_mode=="Upload Video":
+            suffix=Path(uploaded.name).suffix or ".mp4"
+            with tempfile.NamedTemporaryFile(delete=False,suffix=suffix) as tmp:
+                tmp.write(uploaded.getbuffer()); tmp_path=tmp.name
+            display_name=uploaded.name; ap=update
         else:
-            tmp_dir_obj = tempfile.TemporaryDirectory(prefix="video_content_analyzer_")
-            tmp_path, source_metadata = download_youtube_video(
-                youtube_url,
-                tmp_dir_obj.name,
-                progress=update,
-            )
-            display_name = f"{source_metadata.get('title', 'youtube_video')}{Path(tmp_path).suffix}"
+            tmp_dir=tempfile.TemporaryDirectory(prefix="vca_")
+            tmp_path,source_metadata=download_youtube_video(youtube_url,tmp_dir.name,progress=update)
+            display_name=f"{source_metadata.get('title','youtube')}{Path(tmp_path).suffix}"
+            def ap(p,text): update(0.25+0.75*p,text)
 
-            def analysis_progress(p, text):
-                update(0.25 + (0.75 * p), text)
-
-        summary_df, shots_df, analysis_metadata = analyze_video(
-            tmp_path,
-            analyses=selected_analyses,
-            threshold=threshold,
-            min_shot_sec=min_shot,
-            progress=analysis_progress,
+        summary,shots,diagnostics,events,meta=analyze_video(
+            tmp_path,selected_analyses,threshold=threshold,min_shot_sec=min_shot,progress=ap
         )
-
         st.success("Analysis complete.")
-
-        if source_metadata:
-            st.subheader("YouTube source")
-            m1, m2 = st.columns(2)
-            m1.write(f"**Title:** {source_metadata.get('title', '')}")
-            m2.write(f"**Channel:** {source_metadata.get('uploader', '') or '—'}")
-
-        summary_map = dict(zip(summary_df["Measure"], summary_df["Value"]))
-        metric_items = []
+        smap=dict(zip(summary["Measure"],summary["Value"]))
         if SHOT_ANALYSIS in selected_analyses:
-            metric_items.append(
-                ("Detected cuts", str(int(summary_map.get("Detected cuts", 0) or 0)))
-            )
-            metric_items.append(
-                ("Detected shots", str(int(summary_map.get("Detected shots", 0) or 0)))
-            )
-            metric_items.append(
-                (
-                    "Average shot length",
-                    f'{float(summary_map.get("Average shot length (sec)", 0) or 0):.2f} s',
-                )
-            )
-        if WARM_COLOR in selected_analyses:
-            metric_items.append(
-                ("Warm-color ratio", f'{float(summary_map.get("Warm-color ratio (0–1)", 0) or 0):.3f}')
-            )
-        if SATURATION in selected_analyses:
-            metric_items.append(
-                ("Color saturation", f'{float(summary_map.get("Color saturation score (0–1)", 0) or 0):.3f}')
-            )
-        if CONTRAST in selected_analyses:
-            metric_items.append(
-                ("Contrast", f'{float(summary_map.get("Contrast score (0–1)", 0) or 0):.3f}')
-            )
+            c1,c2,c3,c4=st.columns(4)
+            c1.metric("Detected cuts",int(smap.get("Detected cuts",0) or 0))
+            c2.metric("Detected shots",int(smap.get("Detected shots",0) or 0))
+            c3.metric("Average shot length",f'{float(smap.get("Average shot length (sec)",0) or 0):.2f} s')
+            c4.metric("Blocked by min duration",int(smap.get("Threshold-passing frames blocked by minimum duration",0) or 0))
 
-        if metric_items:
-            columns = st.columns(min(4, len(metric_items)))
-            for i, (label, value) in enumerate(metric_items):
-                columns[i % len(columns)].metric(label, value)
+        st.subheader("Research measures"); st.dataframe(summary,use_container_width=True,hide_index=True)
 
-        st.subheader("Research measures")
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        if SHOT_ANALYSIS in selected_analyses:
+            st.caption(f"Timecode: MM:SS:FF  |  Video FPS: {meta.get('fps')}  |  Diagnostic v1.6")
+            if not shots.empty:
+                st.subheader("Detected shots")
+                cols=["shot_number","start_timecode","end_timecode","duration_sec"]
+                st.dataframe(shots[cols],use_container_width=True,hide_index=True)
 
-        if SHOT_ANALYSIS in selected_analyses and analysis_metadata.get("fps"):
-            st.caption(f"Shot validation timecode format: MM:SS:FF  |  Video FPS: {analysis_metadata.get('fps')}")
+            if not events.empty:
+                st.subheader("Diagnostic events")
+                st.caption("All threshold-passing frame transitions plus the strongest local peaks below threshold. These are for diagnosis only; the detector itself has not been changed.")
+                table_cols=["timecode","histogram_distance","threshold_pass","seconds_since_last_accepted_cut","minimum_duration_pass","brightness_delta_signed_0_1","decision","diagnostic_role"]
+                st.dataframe(events[table_cols],use_container_width=True,hide_index=True)
 
-        if SHOT_ANALYSIS in selected_analyses and not shots_df.empty:
-            st.subheader("Shot-level data")
-            table_columns = [c for c in [
-                "shot_number",
-                "start_timecode",
-                "end_timecode",
-                "duration_sec",
-            ] if c in shots_df.columns]
-            st.dataframe(
-                shots_df[table_columns],
-                use_container_width=True,
-                hide_index=True,
-            )
+                st.subheader("Before / after frames for diagnostic events")
+                for rec in events.to_dict("records"):
+                    with st.expander(f"{rec['timecode']}  ·  {rec['diagnostic_role']}  ·  histogram {rec['histogram_distance']:.4f}"):
+                        st.write(
+                            f"**Decision:** {rec['decision']}  |  **Threshold pass:** {rec['threshold_pass']}  |  "
+                            f"**Min-duration pass:** {rec['minimum_duration_pass']}  |  "
+                            f"**Since last accepted cut:** {rec['seconds_since_last_accepted_cut']:.3f}s  |  "
+                            f"**Brightness Δ:** {rec['brightness_delta_signed_0_1']:+.4f}"
+                        )
+                        a,b=st.columns(2)
+                        with a:
+                            st.caption("Frame before")
+                            if rec.get("before_frame_bytes"): st.image(rec["before_frame_bytes"],use_container_width=True)
+                        with b:
+                            st.caption("Frame after")
+                            if rec.get("after_frame_bytes"): st.image(rec["after_frame_bytes"],use_container_width=True)
 
-            if "first_frame_bytes" in shots_df.columns and "last_frame_bytes" in shots_df.columns:
-                st.subheader("Shot boundary validation")
-                st.caption("For each detected shot: exact first frame on the left, exact last frame on the right.")
-                for rec in shots_df.to_dict("records"):
-                    st.markdown(
-                        f"**Shot {rec['shot_number']}** — {rec['start_timecode']} → {rec['end_timecode']}  ·  {rec['duration_sec']:.2f} s"
-                    )
-                    left, right = st.columns(2)
-                    with left:
-                        st.caption(f"First frame · {rec['start_timecode']}")
-                        if rec.get("first_frame_bytes"):
-                            st.image(rec["first_frame_bytes"], use_container_width=True)
-                        else:
-                            st.warning("First frame could not be extracted.")
-                    with right:
-                        st.caption(f"Last frame · {rec['end_timecode']}")
-                        if rec.get("last_frame_bytes"):
-                            st.image(rec["last_frame_bytes"], use_container_width=True)
-                        else:
-                            st.warning("Last frame could not be extracted.")
-                    st.divider()
-
-        excel_bytes = make_excel(
-            summary_df,
-            shots_df,
-            display_name,
-            metadata=analysis_metadata,
-        )
-        stem = Path(display_name).stem
-        st.download_button(
-            "Download Excel report",
-            data=excel_bytes,
-            file_name=f"{stem}_content_analysis.xlsx",
+        excel=make_excel(summary,shots,diagnostics,events,display_name,meta)
+        st.download_button("Download diagnostic Excel report",excel,
+            file_name=f"{Path(display_name).stem}_cut_diagnostics.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            use_container_width=True,
-        )
-
+            type="primary",use_container_width=True)
     except Exception as exc:
         st.error(f"Analysis failed: {exc}")
     finally:
-        if source_mode == "Upload Video" and tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        if tmp_dir_obj is not None:
-            tmp_dir_obj.cleanup()
+        if source_mode=="Upload Video" and tmp_path and os.path.exists(tmp_path): os.unlink(tmp_path)
+        if tmp_dir is not None: tmp_dir.cleanup()
